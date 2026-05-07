@@ -144,7 +144,7 @@ DEFAULTS = {
     # --- Body formatting ---
     'line_spacing': 1.08,
     'first_line_indent': 1.0,
-    'heading_align': 'left',
+    'heading_align': 'center',
     'table_align': 'left',
     'heading_space_before': 6,
     'heading_space_after': 0,
@@ -344,40 +344,53 @@ def build_toc(doc):
 
 
 def strip_first_headings(content):
-    """Remove first # and ## lines (already on title page)."""
+    """Remove first # line (document title, already on title page).
+
+    Only the first H1 is stripped. The first ## is kept — it may be a
+    numbered section heading (e.g. '## 1 Introduction') that carries
+    its own content and tables.
+    """
     lines = content.split('\n')
     result = []
     skipped_h1 = False
-    skipped_h2 = False
     for line in lines:
-        if not skipped_h1 and line.startswith('# '):
+        if not skipped_h1 and line.startswith('# ') and not line.startswith('## '):
             skipped_h1 = True
             continue
-        if skipped_h1 and not skipped_h2 and line.startswith('## '):
-            skipped_h2 = True
-            continue
-        if (skipped_h1 or skipped_h2) and not result and line.strip() == '':
+        if skipped_h1 and not result and line.strip() == '':
             continue
         result.append(line)
     return '\n'.join(result)
 
 
 def shift_headings(content):
-    """Shift heading levels to match ref.odt: #### -> ##, ### -> #, ## -> #.
-    ref.odt uses # (Heading 1) for main sections.
-    Our files use ### for sections and #### for subsections.
-    Shift: #### -> ##, ### -> #, ## stays as # (already removed), ##### -> ###
+    """Shift heading levels so the smallest heading becomes # (Heading 1).
+
+    Auto-detects the minimum heading level in the content and shifts all
+    headings down so that minimum becomes level 1.  For example:
+      - If smallest is ### (3): shift by 2 → ### -> #, #### -> ##
+      - If smallest is ## (2):  shift by 1 → ## -> #, ### -> ##
+      - If smallest is # (1):   no shift needed
     """
     lines = content.split('\n')
+    # Find minimum heading level present
+    min_level = 7
+    for line in lines:
+        match = re.match(r'^(#{1,6})\s', line)
+        if match:
+            min_level = min(min_level, len(match.group(1)))
+    if min_level >= 7:
+        return content  # no headings found
+    shift = min_level - 1
+    if shift == 0:
+        return content
     result = []
     for line in lines:
         if line.startswith('#'):
-            # Count leading #
             match = re.match(r'^(#{1,6})\s', line)
             if match:
                 level = len(match.group(1))
-                # Shift down by 2 levels: ### (3) -> # (1), #### (4) -> ## (2), ##### (5) -> ### (3)
-                new_level = max(1, level - 2)
+                new_level = max(1, level - shift)
                 line = '#' * new_level + line[level:]
         result.append(line)
     return '\n'.join(result)
@@ -438,15 +451,22 @@ def convert(filename, lab_type, lab_num, topic, src_dir, cfg=None):
     if not cfg.get('keep_hr', False):
         content = re.sub(r'^\s*-{3,}\s*$', '', content, flags=re.MULTILINE)
     # Auto-number tables and figures: section.element format (e.g. Таблиця 1.2)
-    # Tracks current Heading 1 section number
+    # Tracks current Heading 1 section number.
+    # Extracts explicit number from heading text (e.g. "# 2 Planning" -> 2),
+    # falls back to auto-increment when heading has no leading number.
     section_num = 0
     table_in_section = 0
     figure_in_section = 0
     lines = content.split('\n')
     result_lines = []
     for line in lines:
-        if re.match(r'^#\s+', line):
-            section_num += 1
+        h1_match = re.match(r'^#\s+(.*)', line)
+        if h1_match:
+            num_match = re.match(r'^(\d+)', h1_match.group(1).strip())
+            if num_match:
+                section_num = int(num_match.group(1))
+            else:
+                section_num += 1
             table_in_section = 0
             figure_in_section = 0
         m_table = re.match(r'^Таблиця:\s*(.+)$', line)
